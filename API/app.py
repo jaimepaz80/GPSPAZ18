@@ -320,6 +320,7 @@ def obtener_fecha_obs(filepath):
                         return year, int(partes[1]), int(partes[2]), int(partes[3]), int(partes[4]), float(partes[5])
                     except: pass
     return None
+
 # =====================================================================
 # PRODUCTOS IGS Y EFEMÉRIDES (HÍBRIDO NAV / SP3)
 # =====================================================================
@@ -634,7 +635,7 @@ def calcular_posicion_satelite_wgs84(eph, t_emision, tau_vuelo, sys_char='G'):
     return (xs * math.cos(theta) + ys * math.sin(theta), -xs * math.sin(theta) + ys * math.cos(theta), zs, dt_sat)
 
 # =====================================================================
-# ENRUTADOR AUTOMÁTICO (REESCRITO POR SEÑALES - VERSIÓN 18)
+# ENRUTADOR AUTOMÁTICO (REESCRITO POR SEÑALES - VERSIÓN 18 CORREGIDA)
 # =====================================================================
 def analizar_calidad_y_senales_rinex(obs_b, obs_r, max_gap_tolerado=0.05):
     tows_b = list(obs_b.keys())
@@ -681,10 +682,10 @@ def analizar_calidad_y_senales_rinex(obs_b, obs_r, max_gap_tolerado=0.05):
     # EVALUACIÓN DETERMINISTA ESTRICTA (SIN DESFASE DE TIEMPO)
     if b_sig == "L1+L5" and r_sig == "L1+L5":
         return "MODO_C_PPK", 1.0, "Señal DUAL L1+L5 detectada en Base y Rover. Enrutando a Módulo C (PPK)."
-    elif b_sig == "L1" and r_sig == "L1":
-        return "MODO_A_CODIGO", 1.0, "Señal HOMOGÉNEA L1 pura detectada. Enrutando a Módulo A (EKF)."
     elif b_sig == "C1" and r_sig == "C1":
         return "MODO_A_CODIGO", 1.0, "Señal HOMOGÉNEA C1 pura detectada. Enrutando a Módulo A (EKF)."
+    elif b_sig == "L1" and r_sig == "L1":
+        return "MODO_B_ASINCRONO", 1.0, "Señal HOMOGÉNEA L1 pura detectada. Enrutando a Módulo B (IRLS por orden estricta)."
     else:
         return "MODO_B_ASINCRONO", 1.0, f"Señal HETEROGÉNEA detectada (Base {b_sig} / Rover {r_sig}). Enrutando a Módulo B (IRLS)."
 
