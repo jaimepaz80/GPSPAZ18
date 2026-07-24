@@ -635,64 +635,81 @@ def calcular_posicion_satelite_wgs84(eph, t_emision, tau_vuelo, sys_char='G'):
     return (xs * math.cos(theta) + ys * math.sin(theta), -xs * math.sin(theta) + ys * math.cos(theta), zs, dt_sat)
 
 # =====================================================================
-# ENRUTADOR AUTOMÁTICO (REESCRITO POR SEÑALES - VERSIÓN 18 CORREGIDA)
+# ENRUTADOR AUTOMÁTICO (REGLAS EXCLUYENTES V18)
 # =====================================================================
 def analizar_calidad_y_senales_rinex(obs_b, obs_r, max_gap_tolerado=0.05):
-    tows_b = list(obs_b.keys())
-    tows_r = list(obs_r.keys())
+    tows_b = sorted(list(obs_b.keys()))
+    tows_r = sorted(list(obs_r.keys()))
     
     if not tows_b or not tows_r: 
         return "MODO_C_SPP", 0.0, "Cero épocas. Archivo vacío o corrupto."
+    
+    t_ini_b, t_fin_b = tows_b[0], tows_b[-1]
+    t_ini_r, t_fin_r = tows_r[0], tows_r[-1]
+    
+    overlap_ini = max(t_ini_b, t_ini_r)
+    overlap_fin = min(t_fin_b, t_fin_r)
+    
+    if overlap_ini > overlap_fin:
+        return "MODO_C_SPP", 0.0, "Cero solapamiento temporal entre Base y Rover. Requiere cálculo autónomo."
         
-    base_C1 = base_L1 = base_C5 = base_L5 = False
-    rover_C1 = rover_L1 = rover_C5 = rover_L5 = False
+    sync_epochs = 0
+    total_eval = 0
     
-    # Escaneo de Base
-    for t in tows_b:
-        for s, d in obs_b[t].items():
-            if s == '_meta': continue
-            if 'C1' in d: base_C1 = True
-            if 'L1' in d: base_L1 = True
-            if 'C5' in d: base_C5 = True
-            if 'L5' in d: base_L5 = True
+    base_L1_count = 0
+    base_L5_count = 0
+    rover_L1_count = 0
+    rover_L5_count = 0
+    
+    for tr in tows_r:
+        if tr < overlap_ini or tr > overlap_fin: continue
+        total_eval += 1
+        idx = min(range(len(tows_b)), key=lambda i: abs(tows_b[i] - tr))
+        gap = abs(tows_b[idx] - tr)
+        
+        if gap <= max_gap_tolerado:
+            sync_epochs += 1
             
-    # Escaneo de Rover
-    for t in tows_r:
-        for s, d in obs_r[t].items():
-            if s == '_meta': continue
-            if 'C1' in d: rover_C1 = True
-            if 'L1' in d: rover_L1 = True
-            if 'C5' in d: rover_C5 = True
-            if 'L5' in d: rover_L5 = True
+        d_r = obs_r[tr]
+        d_b = obs_b[tows_b[idx]]
+        
+        for s in d_r:
+            if s == '_meta' or s not in d_b: continue
+            
+            if 'L1' in d_b[s] and d_b[s]['L1'] != 0.0: base_L1_count += 1
+            if 'L5' in d_b[s] and d_b[s]['L5'] != 0.0: base_L5_count += 1
+            
+            if 'L1' in d_r[s] and d_r[s]['L1'] != 0.0: rover_L1_count += 1
+            if 'L5' in d_r[s] and d_r[s]['L5'] != 0.0: rover_L5_count += 1
+                
+    if total_eval == 0: 
+        return "MODO_C_SPP", 0.0, "Sin épocas en la ventana de solapamiento."
     
-    b_band1 = base_C1 or base_L1
-    b_band5 = base_C5 or base_L5
-    if b_band1 and b_band5: b_sig = "L1+L5"
-    elif base_L1: b_sig = "L1"
-    elif base_C1: b_sig = "C1"
-    else: b_sig = "NONE"
+    ratio_sync = sync_epochs / total_eval
     
-    r_band1 = rover_C1 or rover_L1
-    r_band5 = rover_C5 or rover_L5
-    if r_band1 and r_band5: r_sig = "L1+L5"
-    elif rover_L1: r_sig = "L1"
-    elif rover_C1: r_sig = "C1"
-    else: r_sig = "NONE"
-    
-    # EVALUACIÓN DETERMINISTA ESTRICTA (SIN DESFASE DE TIEMPO)
-    if b_sig == "L1+L5" and r_sig == "L1+L5":
-        return "MODO_C_PPK", 1.0, "Señal DUAL L1+L5 detectada en Base y Rover. Enrutando a Módulo C (PPK)."
-    elif b_sig == "C1" and r_sig == "C1":
-        return "MODO_A_CODIGO", 1.0, "Señal HOMOGÉNEA C1 pura detectada. Enrutando a Módulo A (EKF)."
-    elif b_sig == "L1" and r_sig == "L1":
-        return "MODO_B_ASINCRONO", 1.0, "Señal HOMOGÉNEA L1 pura detectada. Enrutando a Módulo B (IRLS por orden estricta)."
+    tiene_doble_fase = (base_L1_count > 0 and base_L5_count > 0 and 
+                        rover_L1_count > 0 and rover_L5_count > 0)
+                        
+    tiene_fase_mono = (base_L1_count > 0 and rover_L1_count > 0 and 
+                       (base_L5_count == 0 or rover_L5_count == 0))
+                       
+    no_tiene_fase = (base_L1_count == 0 or rover_L1_count == 0)
+
+    if tiene_doble_fase:
+        return "MODO_C_PPK", ratio_sync, "Fase Dual detectada en Base y Rover (L1+L5). Enrutando a MÓDULO C (PPK Dual)."
+    elif tiene_fase_mono:
+        return "MODO_B_FASE", ratio_sync, "Fase Monofrecuencia (L1) detectada. Enrutando a MÓDULO B (Blindaje IRLS para evitar divergencia EKF)."
+    elif no_tiene_fase:
+        if ratio_sync > 0.5:
+            return "MODO_A_CODIGO", ratio_sync, "Código Puro homogéneo (>50% sinc). Enrutando a MÓDULO A (EKF de Código)."
+        else:
+            return "MODO_B_ASINCRONO", ratio_sync, "Código Puro con asincronía severa (<50% sinc). Enrutando a MÓDULO B (IRLS Asíncrono)."
     else:
-        return "MODO_B_ASINCRONO", 1.0, f"Señal HETEROGÉNEA detectada (Base {b_sig} / Rover {r_sig}). Enrutando a Módulo B (IRLS)."
+        return "MODO_B_ASINCRONO", ratio_sync, "Fallo en clasificación lógica. Enrutando a Módulo de rescate B."
 
 # =====================================================================
 # AISLAMIENTO DE OBSERVABLES (MÓDULOS A, B Y C)
 # =====================================================================
-# EXTRACTOR EXCLUSIVO MÓDULO A (INTACTO VERSIÓN 16)
 def aislar_diferencias_simples_ppk(obs_b, obs_r):
     sd_suavizada = {}
     for tow in sorted(list(obs_r.keys())):
@@ -738,7 +755,6 @@ def aislar_diferencias_simples_ppk(obs_b, obs_r):
         if len(sd_epoca) > 2: sd_suavizada[tow] = sd_epoca
     return sd_suavizada
 
-# EXTRACTOR EXCLUSIVO MÓDULO B (INTACTO VERSIÓN 16)
 def aislar_diferencias_MODO_B(obs_b, obs_r):
     sd_suavizada = {}
     for tow in sorted(list(obs_r.keys())):
@@ -770,7 +786,6 @@ def aislar_diferencias_MODO_B(obs_b, obs_r):
         if len(sd_epoca) > 1: sd_suavizada[tow] = sd_epoca
     return sd_suavizada
 
-# EXTRACTOR EXCLUSIVO MÓDULO C (INTACTO VERSIÓN 17)
 def aislar_diferencias_MODO_C(obs_b, obs_r):
     sd_suavizada = {}
     for tow in sorted(list(obs_r.keys())):
@@ -809,7 +824,7 @@ def aislar_diferencias_MODO_C(obs_b, obs_r):
     return sd_suavizada
 
 # =====================================================================
-# VÍA 1 -> MÓDULO A: MOTOR EKF + LAMBDA + RTS (INTACTO DE app (14).py / VERSIÓN 16)
+# VÍA 1 -> MÓDULO A: MOTOR EKF + LAMBDA + RTS
 # =====================================================================
 def decorrelacion_lambda_z(Q):
     n = len(Q)
@@ -967,7 +982,7 @@ def procesar_ekF_lambda(sd_epoca, nav, sp3, kf_estado, tr, mask_angle, snr_mask)
             rho_r, iono_r, dist_r = calc_rho(r_data['sp_r'], X_apc, Y_apc, Z_apc, lat_r, lon_r, alt_r + h_r, el_r, az_r, r_data['wave'], tr)
             
             SD_P_calc_ref = (rho_r + iono_r) - base_calcs[r_sat]['P']
-            SD_CP_calc_ref = (rho_r - iono_r) - base_calcs[r_sat]['CP']
+            SD_CP_calc_ref = (rho_r - iono_r) - base_calcs.get(r_sat, {}).get('CP', 0.0)
             
             c_ref[c] = {'dist_r': dist_r, 'SD_P_calc_ref': SD_P_calc_ref, 'SD_CP_calc_ref': SD_CP_calc_ref, 'sp_r': r_data['sp_r'], 'el_r': el_r, 'snr': r_data['snr'], 'sd_P': r_data['sd_P'], 'cp_r': r_data['cp_r'], 'cp_b': r_data['cp_b']}
         
@@ -980,10 +995,7 @@ def procesar_ekF_lambda(sd_epoca, nav, sp3, kf_estado, tr, mask_angle, snr_mask)
             rho_i_r, iono_i_r, dist_i_r = calc_rho(data['sp_r'], X_apc, Y_apc, Z_apc, lat_r, lon_r, alt_r + h_r, el_i_r, az_i_r, data['wave'], tr)
             
             SD_P_calc_i = (rho_i_r + iono_i_r) - base_calcs[s]['P']
-            SD_CP_calc_i = (rho_i_r - iono_i_r) - base_calcs[s]['CP']
-            
             DD_P_calc = SD_P_calc_i - rc['SD_P_calc_ref']
-            DD_CP_calc = SD_CP_calc_i - rc['SD_CP_calc_ref']
             
             dx_geom = [
                 -(data['sp_r'][0] - X_apc) / dist_i_r - (-(rc['sp_r'][0] - X_apc) / rc['dist_r']),
@@ -1000,6 +1012,8 @@ def procesar_ekF_lambda(sd_epoca, nav, sp3, kf_estado, tr, mask_angle, snr_mask)
             
             if data['cp_r'] is not None and data['cp_b'] is not None and rc['cp_r'] is not None and rc['cp_b'] is not None:
                 wave = data['wave']
+                SD_CP_calc_i = (rho_i_r - iono_i_r) - base_calcs[s]['CP']
+                DD_CP_calc = SD_CP_calc_i - rc['SD_CP_calc_ref']
                 
                 cp_valid = True
                 if s in kf_estado['prev_cp']:
@@ -1061,16 +1075,16 @@ def procesar_ekF_lambda(sd_epoca, nav, sp3, kf_estado, tr, mask_angle, snr_mask)
         kf_estado['fix_flags'] = 0 
         
         state_dict = {
-            'tow': tr, 'X_pri': X_pri, 'P_pri': P_pri, 'X_post': X_post, 'P_post': P_post
+            'tow': tr, 'X_pri': X_pri, 'P_pri': P_pri, 'X_post': X_post, 'P_post': Q_cov, 'tide': (dx_tide, dy_tide, dz_tide)
         }
         
-        return (X_post[0][0], X_post[1][0], X_post[2][0]), status, kf_estado, state_dict
+        return (X_post[0][0] - dx_tide, X_post[1][0] - dy_tide, X_post[2][0] - dz_tide), status, kf_estado, state_dict
 
     except Exception as e:
         return None, f"FAILED_EXCEPTION:_{str(e)}", kf_estado, None
 
 # =====================================================================
-# VÍA 2 -> MÓDULO B: MOTOR IRLS CLÁSICO (ASINCRÓNICO / CÓDIGO PURO)
+# VÍA 2 -> MÓDULO B: MOTOR IRLS CLÁSICO
 # =====================================================================
 def calcular_IRLS_MODO_B(sd_epoca, nav, X_b, Y_b, Z_b, tr, mask_angle):
     try:
@@ -1212,7 +1226,7 @@ def calcular_IRLS_MODO_B(sd_epoca, nav, X_b, Y_b, Z_b, tr, mask_angle):
         return None, f"FAILED_EXCEPTION:_{str(e)}"
 
 # =====================================================================
-# VÍA 3 -> MÓDULO C: NUEVO MOTOR PPK L1+L5 (INTACTO DE app (15).py / VERSIÓN 17)
+# VÍA 3 -> MÓDULO C: NUEVO MOTOR PPK L1+L5 (DOBLE FRECUENCIA SIMULTÁNEA)
 # =====================================================================
 def procesar_ekF_PPK_L1_L5(sd_epoca, nav, sp3, kf_estado, tr, mask_angle, snr_mask):
     try:
@@ -1669,7 +1683,7 @@ def tab1_homogenizar():
             base_raw_dict = parse_rinex_obs_completo(p_b_raw)
             rover_raw_dict = parse_rinex_obs_completo(p_r_raw)
             
-            yield "> [ENRUTADOR] Evaluando calidad de señales y asignando módulo...\n"
+            yield "> [ENRUTADOR] Evaluando calidad de señales y sincronía geométrica...\n"
             modo_str, ratio, msg = analizar_calidad_y_senales_rinex(base_raw_dict, rover_raw_dict, max_gap_tolerado=0.5)
             yield f"  [-] Módulo pre-asignado: {modo_str}\n"
             yield f"  [-] Justificación: {msg}\n\n"
@@ -2216,20 +2230,14 @@ def tab4_procesar():
                 sm_states = suavizador_rts_backward(fwd_states)
                 
                 coords = []
-                if modo_str == "MODO_A_CODIGO":
-                    for i in range(len(sm_states)):
-                        la, lo, al = ecef_a_geodesicas(sm_states[i][0][0], sm_states[i][1][0], sm_states[i][2][0])
-                        nt, et = geodesicas_a_utm(la, lo, utm_h)
-                        coords.append((nt, et, al, fwd_states[i]['status']))
-                else:
-                    for i in range(len(sm_states)):
-                        dx_t, dy_t, dz_t = fwd_states[i]['tide']
-                        x_crustal = sm_states[i][0][0] - dx_t
-                        y_crustal = sm_states[i][1][0] - dy_t
-                        z_crustal = sm_states[i][2][0] - dz_t
-                        la, lo, al = ecef_a_geodesicas(x_crustal, y_crustal, z_crustal)
-                        nt, et = geodesicas_a_utm(la, lo, utm_h)
-                        coords.append((nt, et, al, fwd_states[i]['status']))
+                for i in range(len(sm_states)):
+                    dx_t, dy_t, dz_t = fwd_states[i]['tide']
+                    x_crustal = sm_states[i][0][0] - dx_t
+                    y_crustal = sm_states[i][1][0] - dy_t
+                    z_crustal = sm_states[i][2][0] - dz_t
+                    la, lo, al = ecef_a_geodesicas(x_crustal, y_crustal, z_crustal)
+                    nt, et = geodesicas_a_utm(la, lo, utm_h)
+                    coords.append((nt, et, al, fwd_states[i]['status']))
 
             else:
                 yield f"\n> [SISTEMA] Iniciando Procesamiento DGPS | MÓDULO B (IRLS Clásico Termux)...\n"
